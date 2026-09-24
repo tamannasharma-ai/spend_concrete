@@ -1,0 +1,6 @@
+streamlit==1.64.0
+langgraph==1.2.11
+requests==2.34.2
+pandas==2.3.3
+altair==6.3.0
+openpyxl==3.1.5
