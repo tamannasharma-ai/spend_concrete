@@ -12,11 +12,15 @@ from spendwise.planning import plan_all, validate_materials, NUMERIC
 from spendwise.sources import COUNTRIES, DBNOMICS_INDICATORS, refresh, now
 from spendwise.retrieval import retrieve
 from spendwise.market_sources import WB_INDICATORS, TE_INDICATORS, world_bank, trading_economics
+from spendwise.research import TOPICS, DOMAINS, run_research, report_markdown
+from spendwise.intelligence import PROVIDERS, parse_records, fetch_feed, evidence_records
 
 st.set_page_config(page_title="SpendWiseConcreteAI", page_icon=":material/domain:", layout="wide")
 
 DEFAULTS = {"materials": demo.materials(), "data_mode": "Demo", "documents": [], "statuses": [],
-            "source_country": "", "source_selection": None, "user_documents": [], "brief": None, "brief_signature": ""}
+            "source_country": "", "source_selection": None, "user_documents": [], "brief": None, "brief_signature": "",
+            "research_report": None, "research_documents": [], "research_country": "",
+            "external_documents": [], "external_preview": None, "external_statuses": [], "external_use": False}
 for name, value in DEFAULTS.items():
     if name not in st.session_state:
         st.session_state[name] = value
@@ -99,7 +103,7 @@ with st.sidebar:
         key_name = "GEMINI_API_KEY" if provider == "Gemini" else "GROQ_API_KEY"
         key = st.text_input("API key", type="password", key=f"key_{provider}") or secret(key_name)
         eligible = st.checkbox("I am using a free-tier account/model", key=f"free_{provider}")
-        st.caption("Account billing is controlled by your provider. No automatic provider switching. Selected evidence and procurement figures are sent only when you run the brief.")
+        st.caption("Account billing is controlled by your provider. No automatic provider switching. Running a brief sends evidence and procurement figures; running research sends its scope and public evidence.")
     else:
         st.caption("No API key needed. Numerical planning and evidence retrieval work offline; generative AI is off.")
 
@@ -126,11 +130,16 @@ settings = {"target_days": target, "safety_days": safety, "delay_days": delay, "
 plans = plan_all(st.session_state.materials, **settings)
 plan_df = pd.DataFrame(plans)
 documents = st.session_state.documents + st.session_state.user_documents
+if st.session_state.external_use:
+    documents += st.session_state.external_documents
+if st.session_state.research_country == country_name:
+    documents += st.session_state.research_documents
 if st.session_state.data_mode == "Demo":
     documents += demo.evidence()
+documents = list({d["id"]: d for d in documents}.values())
 signature = hashlib.sha256(json.dumps({"plan": plans, "docs": documents, "country": country_code}, sort_keys=True).encode()).hexdigest()
 
-overview, market, scenario, copilot, data = st.tabs(["Procurement overview", "Market & evidence", "Scenario planner", "AI briefing", "Data workspace"])
+overview, market, research_tab, external_tab, scenario, copilot, data = st.tabs(["Procurement overview", "Market & evidence", "Supply research", "External intelligence", "Scenario planner", "AI briefing", "Data workspace"])
 
 with overview:
     st.subheader("Your next procurement decisions")
@@ -293,6 +302,181 @@ with copilot:
                   "evidence": result["evidence"], "trace": result["trace"], "warnings": result["warnings"]}
         st.download_button("Download brief and audit record", json.dumps(export, ensure_ascii=False, indent=2), "spendwise_brief.json", "application/json")
     st.caption("Offline mode uses lexical retrieval and templates. Hosted mode adds real model tool calling. Citation-ID validation does not certify every narrative claim; review the linked evidence.")
+
+with research_tab:
+    st.subheader("Concrete supply research agent")
+    st.write("Investigate material availability, disruption signals, and procurement context for your plant country.")
+    st.caption("Plan → search → assess coverage → follow up → report. Up to one search per topic plus two follow-ups. Recent searches cover the past year; follow-ups may retrieve older background.")
+    search_key = st.text_input("Tavily search API key", type="password", key="research_search_key") or secret("TAVILY_API_KEY")
+    st.caption("Uses your Tavily quota. Search queries contain the country, selected topics, and your research focus. Avoid private supplier details in the focus field. Keys and results stay in this session.")
+    research_topics = st.multiselect("Research topics", list(TOPICS), default=list(TOPICS), key="research_topics")
+    research_focus = st.text_area("Research focus (optional)", max_chars=600, key="research_focus",
+                                  placeholder="e.g. European cement imports, low-carbon binder availability, winter logistics")
+    st.caption(f"Region: {country_name} · Analysis: {provider}. Offline disables model synthesis, but this research action still searches the web.")
+    with st.expander("Source selection and report limits"):
+        for category, domains in DOMAINS.items():
+            st.write(f"{category}: {', '.join(domains)}")
+        st.write("Publisher screening is a credibility heuristic, not a guarantee. Search extracts may be incomplete. Multiple publishers may repeat the same original account. The agent cannot cover every internet source or calculate disruption probabilities.")
+    can_research = bool(search_key and research_topics and (provider == "Offline" or (key and eligible)))
+    if not search_key:
+        st.info("Add a Tavily API key here or set TAVILY_API_KEY in Streamlit secrets to enable live research.")
+    if st.button("Run supply research", type="primary", key="research_run", disabled=not can_research):
+        progress = st.empty()
+        with st.spinner("Researching supply evidence…"):
+            try:
+                result = run_research(country_name, research_topics, research_focus, search_key,
+                                      provider, model, key, progress=progress.info)
+                st.session_state.research_report = result
+                st.session_state.research_documents = result["evidence"]
+                st.session_state.research_country = country_name
+                st.session_state.brief = None
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        progress.empty()
+    research_result = st.session_state.research_report
+    if research_result:
+        scope = research_result["scope"]
+        if (scope["country"], scope["topics"], scope["focus"]) != (country_name, research_topics, research_focus):
+            st.warning("Research inputs changed. This is the previous report; run research again for the current scope.")
+        st.caption(f"Report snapshot: {scope['country']} · {scope['as_of']} · {research_result['mode']}")
+        for warning in research_result["warnings"]:
+            st.warning(warning)
+        with st.container(horizontal=True):
+            st.metric("Sources retrieved", len(research_result["evidence"]))
+            st.metric("Searches used", f"{len(research_result['trace'])} / {research_result['search_budget']}")
+            st.metric("Topics with evidence", sum(c["documents"] > 0 for c in research_result["coverage"].values()))
+        for finding in research_result["analysis"]["findings"]:
+            with st.container(border=True):
+                st.markdown(f"#### {finding['topic']}")
+                st.write(finding["assessment"])
+                st.write("Conditional disruption scenario: " + finding["scenario"])
+                st.write("Monitor: " + finding["trigger"])
+                st.write("Next action: " + finding["action"])
+                st.caption("Sources: " + ", ".join(finding["source_ids"]))
+        if not research_result["analysis"]["findings"]:
+            st.info("Evidence report only: review the source extracts below. Select Gemini or Groq to generate a cited analysis and conditional disruption scenarios.")
+        for gap in research_result["analysis"]["gaps"]:
+            st.write("Evidence gap: " + gap)
+        for doc in research_result["evidence"]:
+            with st.expander(f"[{doc['id']}] {doc['title']}"):
+                st.caption(f"{doc['source_type']} · Published: {doc['published_at']} · Retrieved: {doc['retrieved_at']}")
+                st.caption(doc["content_type"] + " — source text, not verified conclusions")
+                st.text(doc["text"])
+                st.link_button("Read original source", doc["url"], key="research_" + doc["id"])
+        with st.expander("Research activity and coverage"):
+            st.json({"coverage": research_result["coverage"], "searches": research_result["trace"]})
+        st.download_button("Download research report", report_markdown(research_result), "spendwise_supply_research.md", "text/markdown", key="research_md")
+        st.download_button("Download research evidence and audit", json.dumps(research_result, ensure_ascii=False, indent=2), "spendwise_supply_research.json", "application/json", key="research_json")
+        st.caption("Research evidence is also available in Market & evidence and AI briefing for the report's country. Research does not alter inventory calculations. Citation checks do not verify factual support or supplier exposure.")
+
+with external_tab:
+    st.subheader("External market intelligence")
+    st.write("Bring procurement reports, commodity prices, and supplier intelligence into Spendwise.")
+    external_provider = st.selectbox("Data provider", ["World Bank", "Trading Economics"] + list(PROVIDERS), key="external_provider")
+    if external_provider in ("World Bank", "Trading Economics"):
+        catalog = WB_INDICATORS if external_provider == "World Bank" else TE_INDICATORS
+        selected_external = st.multiselect("Benchmarks to fetch", list(catalog), default=list(catalog)[:3],
+                                           format_func=lambda c: catalog[c][0], key="external_benchmarks_" + external_provider)
+        access_key = ""
+        if external_provider == "Trading Economics":
+            access_key = st.text_input("Trading Economics access key", type="password", key="external_te_key") or secret("TRADING_ECONOMICS_API_KEY")
+            st.caption("API subscription with commodity access required.")
+        else:
+            st.caption("Ready to fetch · Public monthly Pink Sheet benchmarks. No account needed; public results are cached for one hour.")
+        if st.button("Fetch benchmarks", key="external_fetch_benchmarks", disabled=not selected_external or (external_provider == "Trading Economics" and not access_key)):
+            with st.spinner("Fetching benchmarks…"):
+                fetched, statuses = (world_bank_sources(tuple(selected_external)) if external_provider == "World Bank"
+                                      else trading_economics(selected_external, access_key))
+            # Replace this provider's previous fetch, including failures; do not present old data as fresh.
+            prefix = "WB-" if external_provider == "World Bank" else "TE-"
+            st.session_state.external_documents = [d for d in st.session_state.external_documents if not d["id"].startswith(prefix)] + fetched
+            st.session_state.external_statuses = statuses
+            st.session_state.brief = None
+            st.rerun()
+    else:
+        portal, _ = PROVIDERS[external_provider]
+        if portal:
+            st.link_button("Open provider portal", portal)
+        st.caption("File import is ready. Direct API access requires a provider-issued endpoint and token; no AmplifiPRO API contract is assumed.")
+        method = st.radio("Get data", ["Import export", "Configured API"], key="external_method")
+        if method == "Import export":
+            st.caption("Upload UTF-8 CSV or a JSON array, then map your export columns. Maximum 5 MB / 1,000 records. Price, currency, unit and geography columns can all be included as content.")
+            template = 'title,text,date,url\nExample cement market report,Replace with your exported content,2026-09-01,\n'
+            st.download_button("Download import template", template, "intelligence_template.csv", "text/csv")
+            external_file = st.file_uploader("Provider export", type=["csv", "json"], key="external_file")
+            if st.button("Preview export", key="external_preview_file", disabled=external_file is None):
+                st.session_state.external_preview = None
+                try:
+                    frame = parse_records(external_file.getvalue(), external_file.name.rsplit(".", 1)[-1].lower())
+                    st.session_state.external_preview = {"provider": external_provider, "frame": frame, "method": method}
+                except ValueError as exc:
+                    st.error(str(exc))
+        else:
+            configs = secret("INTELLIGENCE_FEEDS") or {}
+            config = dict(configs.get(external_provider, {})) if hasattr(configs, "get") else {}
+            api_token = st.text_input("Provider API token", type="password", key="external_api_token_" + external_provider) or config.get("token", "")
+            if not config.get("endpoint"):
+                st.info("Not connected. When you obtain API access, configure this provider under INTELLIGENCE_FEEDS in Streamlit secrets. See README for the supported contract.")
+            if st.button("Fetch provider data", key="external_fetch_api", disabled=not (config.get("endpoint") and api_token)):
+                st.session_state.external_preview = None
+                try:
+                    with st.spinner("Fetching provider data…"):
+                        frame = fetch_feed(external_provider, config, api_token)
+                    st.session_state.external_preview = {"provider": external_provider, "frame": frame, "method": method}
+                except ValueError as exc:
+                    st.error(str(exc))
+        preview = st.session_state.external_preview
+        if preview and preview["provider"] == external_provider and preview["method"] == method:
+            frame = preview["frame"]
+            st.dataframe(frame.head(20), hide_index=True)
+            st.caption(f"{len(frame)} records loaded. Preview shows the first 20. Importing stores the mapped records in this session.")
+            columns = list(frame.columns)
+            with st.form("external_mapping"):
+                title_col = st.selectbox("Title / material column", columns)
+                content_cols = st.multiselect("Content columns", columns, default=[c for c in columns if c not in ("title", "date", "url")][:6])
+                date_col = st.selectbox("Observation / publication date column", ["(none)"] + columns,
+                                        index=columns.index("date") + 1 if "date" in columns else 0)
+                url_col = st.selectbox("Original source URL column", ["(none)"] + columns,
+                                       index=columns.index("url") + 1 if "url" in columns else 0)
+                if st.form_submit_button("Import into intelligence library"):
+                    try:
+                        imported = evidence_records(frame, external_provider, title_col, content_cols,
+                                                    None if date_col == "(none)" else date_col,
+                                                    None if url_col == "(none)" else url_col)
+                        merged = {d["id"]: d for d in st.session_state.external_documents}
+                        merged.update({d["id"]: d for d in imported})
+                        if len(merged) > 1000:
+                            raise ValueError("Session limit is 1,000 records. Clear the library before importing more.")
+                        st.session_state.external_documents = list(merged.values())
+                        st.session_state.external_preview = None
+                        st.session_state.brief = None
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+    for external_status in st.session_state.external_statuses:
+        st.caption(f"{external_status['source']}: {external_status['status']} · {external_status['detail']}")
+    st.divider()
+    st.checkbox("Include external intelligence in evidence search and AI briefing", key="external_use")
+    st.caption("When enabled, running a hosted AI briefing sends relevant external records to your selected model. Imported provider labels are user-supplied. Units, geography and dates remain as supplied; inventory prices are not changed.")
+    external_docs = st.session_state.external_documents
+    st.write(f"{len(external_docs)} records in your session library")
+    if external_docs:
+        st.dataframe(pd.DataFrame([{k: d.get(k, "") for k in ("title", "source", "published_at", "retrieved_at")} for d in external_docs]), hide_index=True)
+        record_index = st.selectbox("Inspect record", range(len(external_docs)), format_func=lambda i: external_docs[i]["title"], key="external_inspect")
+        selected_doc = external_docs[record_index]
+        st.text(selected_doc["text"])
+        if selected_doc.get("series"):
+            st.line_chart(pd.DataFrame(selected_doc["series"]), x="date", y="value")
+        if selected_doc.get("url"):
+            st.link_button(selected_doc.get("link_type", "Original source"), selected_doc["url"])
+        st.download_button("Download intelligence library", json.dumps(external_docs, ensure_ascii=False, indent=2), "spendwise_intelligence.json", "application/json")
+        if st.button("Clear external intelligence", key="external_clear"):
+            st.session_state.external_documents = []
+            st.session_state.external_preview = None
+            st.session_state.external_statuses = []
+            st.session_state.brief = None
+            st.rerun()
 
 with data:
     st.subheader("Your plant, your procurement data")

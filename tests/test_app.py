@@ -5,6 +5,50 @@ from unittest.mock import patch
 APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 
+def test_external_intelligence_no_access_and_brief_integration():
+    from spendwise.intelligence import evidence_records, parse_records
+    app = AppTest.from_file(APP, default_timeout=25).run()
+    app.selectbox(key="external_provider").select("AmplifiPRO").run()
+    app.radio(key="external_method").set_value("Configured API").run()
+    assert app.button(key="external_fetch_api").disabled
+    frame = parse_records(b'title,text\nCement,Imported cement report\n', 'csv')
+    docs = evidence_records(frame, "AmplifiPRO", "title", ["text"])
+    app.session_state["external_documents"] = docs
+    app.checkbox(key="external_use").check().run()
+    app.text_area(key="question").set_value("cement report").run()
+    app.button(key="brief_button").click().run()
+    assert any(d["id"] == docs[0]["id"] for d in app.session_state["brief"]["evidence"])
+    app.button(key="external_clear").click().run()
+    assert not app.session_state["external_documents"]
+    assert app.session_state["brief"] is None
+    assert not app.exception
+
+
+def test_supply_research_integration_and_scope_warning():
+    app = AppTest.from_file(APP, default_timeout=25).run()
+    assert app.button(key="research_run").disabled
+    app.text_input(key="research_search_key").set_value("test-search-key").run()
+    app.multiselect(key="research_topics").set_value(["Cement & clinker"]).run()
+    source = {"url": "https://usgs.gov/cement", "title": "Cement supply", "content": "Cement production background. " * 20}
+    with patch("spendwise.research.search_web", return_value=[source]) as search:
+        app.button(key="research_run").click().run()
+        assert not app.exception
+        count = search.call_count
+        app.slider(key="safety").set_value(9).run()
+        assert search.call_count == count
+    report = app.session_state["research_report"]
+    assert len(report["evidence"]) == 1
+    assert "test-search-key" not in str(report)
+    app.text_area(key="question").set_value("cement production").run()
+    app.button(key="brief_button").click().run()
+    assert any(d["kind"] == "research" for d in app.session_state["brief"]["evidence"])
+    app.selectbox(key="country").select("France").run()
+    assert any("Research inputs changed" in w.value for w in app.warning)
+    app.button(key="brief_button").click().run()
+    assert not any(d["kind"] == "research" for d in app.session_state["brief"]["evidence"])
+    assert not app.exception
+
+
 def test_demo_launch_and_delay_scenario():
     app = AppTest.from_file(APP, default_timeout=25).run()
     assert not app.exception
@@ -42,6 +86,17 @@ def test_dbnomics_refresh_brief_and_selection_invalidation():
     with patch("spendwise.sources.refresh", return_value=([doc], [])):
         app.button(key="refresh").click().run()
     assert not app.exception
+    assert any("Historical data" in w.value for w in app.warning)
+    app.button(key="brief_button").click().run()
+    assert not app.exception
+    assert any(d["id"] == doc["id"] for d in app.session_state["brief"]["evidence"])
+    app.multiselect(key="dbnomics_selection").set_value(["B081"]).run()
+    assert not app.session_state["documents"]
+    assert app.session_state["brief"] is None
+    app.session_state["documents"] = [doc]
+    app.selectbox(key="country").select("France").run()
+    assert not app.session_state["documents"]
+    assert not app.exception
 
 
 def test_world_bank_and_te_sources_remain_session_scoped():
@@ -71,14 +126,3 @@ def test_world_bank_and_te_sources_remain_session_scoped():
     app.text_input(key="te_key").set_value("replacement-key").run()
     assert not app.session_state["documents"]
     assert app.session_state["brief"] is None
-    assert any("Historical data" in w.value for w in app.warning)
-    app.button(key="brief_button").click().run()
-    assert not app.exception
-    assert any(d["id"] == doc["id"] for d in app.session_state["brief"]["evidence"])
-    app.multiselect(key="dbnomics_selection").set_value(["B081"]).run()
-    assert not app.session_state["documents"]
-    assert app.session_state["brief"] is None
-    app.session_state["documents"] = [doc]
-    app.selectbox(key="country").select("France").run()
-    assert not app.session_state["documents"]
-    assert not app.exception

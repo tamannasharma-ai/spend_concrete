@@ -25,6 +25,75 @@ Open http://localhost:8502. Start with the labeled demo, refresh official source
 - Optional Gemini or Groq tool calling with at most three model requests, limited tool calls and deterministic fallback.
 - CSV imports/exports, editable snapshots and downloadable JSON brief with evidence and activity log.
 
+## External intelligence module
+
+Open **External intelligence** to fetch World Bank benchmarks without an account,
+or Trading Economics with an entitled API key. The same module accepts AmplifiPRO,
+ICIS, S&P Global, Fastmarkets, or other provider exports as UTF-8 CSV / JSON arrays.
+Preview the records, map title, content, date and URL columns, then import. Include
+price, unit, currency and geography as content columns for quantitative exports.
+Limits: 5 MB, 1,000 records, 50 columns. Blank required fields and invalid dates
+reject the import. Exact duplicate records are merged. Data remains session-scoped.
+
+AmplifiPRO account access is not configured. No native AmplifiPRO API schema has
+been verified. The generic adapter supports one HTTPS GET, bearer or X-API-Key
+authentication, and a JSON array at a configured dot-separated records path.
+No pagination or token refresh is implemented. If your vendor uses a different
+contract, its documentation is needed to extend the adapter. There is no portal scraper.
+
+After receiving vendor API documentation, configure `.streamlit/secrets.toml`:
+
+```toml
+[INTELLIGENCE_FEEDS.AmplifiPRO]
+endpoint = "" # Insert the actual vendor-issued HTTPS endpoint, without a query string.
+auth = "bearer" # Or "x-api-key"
+records_path = "" # Empty for a top-level array; e.g. "data.items" for a nested array.
+token = "" # Alternatively enter the token in the app.
+```
+
+Equivalent sections can use quoted provider names such as
+`[INTELLIGENCE_FEEDS."S&P Global"]`. Supported host families are listed in
+`spendwise/intelligence.py`. Other-provider imports work; custom-host API fetching
+is not enabled. Redirects are rejected. Tokens are never stored in evidence exports.
+
+Use **Include external intelligence in evidence search and AI briefing** to make
+the library available to the existing briefing workflow. With hosted AI selected,
+running a brief sends relevant records to that provider. Imported labels and content
+are not independently verified. No unit conversion, local exposure inference, or
+inventory price adjustment occurs. Download the library before ending the session.
+
+## Supply research agent
+
+Open **Supply research**, add a `TAVILY_API_KEY`, choose topics, and click **Run supply research**.
+The key can also be configured in `.streamlit/secrets.toml` or the environment.
+Search uses the [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search).
+It requires an account with available search quota; no new Python dependencies are needed.
+
+The agent plans one search per selected topic (cement/clinker, aggregates, SCMs, admixtures,
+energy/logistics, water/climate, and trade/regulation), screens results against a curated
+publisher list, deduplicates URLs, and runs at most two background follow-ups for topics
+with fewer than two publishers. A full run makes at most nine search requests. Initial
+searches request the past year; background follow-ups are unrestricted by date. Unknown
+publication dates remain explicitly unknown. Publisher count is not independent corroboration.
+
+Select Gemini or Groq in the sidebar for structured findings, conditional disruption
+scenarios, monitoring triggers, and actions. One additional model request is made. Every
+finding must cite retrieved IDs; malformed or uncited analysis falls back to the evidence
+report. This does not validate factual entailment. Offline mode disables model calls but
+**Run supply research still uses live search** and produces an evidence report.
+
+Country, topics, and focus are sent to Tavily. Synthesis sends the research scope and public
+evidence to the selected model, without inventory or supplier records. Avoid private data
+in the focus field. Reports and keys stay in the session; ordinary UI reruns do not repeat
+searches. Download Markdown reports and JSON evidence/audits to retain them. Search and
+model failures are reported without exposing credentials or substituting invented evidence.
+
+Evidence automatically joins the existing Market & evidence library and AI briefing for
+the report's country. Changed research inputs mark the previous snapshot stale; a country
+change excludes that report from briefing evidence. Research never changes purchasing math.
+Coverage is bounded, not exhaustive; industry accounts can be biased and excerpts incomplete.
+Disruption scenarios are conditional, not calibrated probabilities or proven supplier exposure.
+
 ## Optional DBnomics indicators
 
 Enable **Include DBnomics indicators** in the sidebar, select the indicators, then click
